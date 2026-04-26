@@ -15,6 +15,7 @@
 // ==/UserScript==
 
 /* global W, OpenLayers, WazeWrap, trustedTypes */
+// import type { KeyboardShortcut, Selection, UserSession, WmeSDK } from "wme-sdk-typings";
 
 (function () {
     'use strict';
@@ -89,11 +90,35 @@
     /*
         Add the layer to the map if it does not exist
     */
-    async function addLayer() {
-        const date = getMostRecentDate();
+    async function addLayer(displayDate) {
+        const date = displayDate ?? getMostRecentDate();
         const ticket = await getTicket();
         const url = createURL(date, ticket);
 
+        layer = {
+            layerName: NAME,
+            layerOptions: {
+                tileHeight: 256,
+                tileWidth: 256,
+                url: {
+                    fileName: 'maps/?z=${z}&x=${x}&y=${y}',
+                    params: {
+                        nml: 'V',
+                        version: 2,
+                        nmd: date,
+                        ticket: ticket
+                    },
+                    servers: [
+                        'https://us0.nearmap.com'
+                    ]
+                }
+            }
+        }
+        wmeSDK.Map.addTileLayer( layer )
+        //wmeSDK.Map.setLayerVisibility( { layerName: NAME, visibility: false })
+        const satImgZ = wmeSDK.Map.getLayerZIndex( { layerName: 'satellite_imagery'})
+        wmeSDK.Map.setLayerZIndex( { layerName: NAME, zIndex: satImgZ+1 })
+/*
         layer = new OpenLayers.Layer.XYZ(
             NAME,
             url,
@@ -130,13 +155,26 @@
         });
         W.map.addLayer(layer);
         W.map.setLayerIndex(layer, 3);
+*/
+    }
+
+    async function removeLayer() {
+        wmeSDK.Map.removeLayer( { layerName: NAME })
     }
 
     async function updateLayerDate(date) {
+        if (wmeSDK.LayerSwitcher.isLayerCheckboxChecked({ name: NAME })) {
+            removeLayer()
+            addLayer(date)
+        }
+/*
+        removeLayer()
+        addLayer()
         if (!layer) return;
         let ticket = await getTicket();
         layer.url = createURL(date, ticket);
         layer.redraw();
+*/
     }
 
     /*
@@ -206,11 +244,19 @@
     */
     function toggleBasemap() {
         layerEnabled = !layerEnabled;
-        layer?.setVisibility(layerEnabled);
+
+        if (layerEnabled) {
+            addLayer(currentDate);
+        } else {
+            removeLayer();
+        }
+
+        //wmeSDK.Map.setLayerVisibility( {layerName: NAME, visibility: layerEnabled })
+        //layer?.setVisibility(layerEnabled);
 
         const power = document.getElementById(ELEMENT_SETTINGS_TOGGLE_ID + '_power');
         power.style.color = layerEnabled ? '#00bd00' : '#bdbdbd';
-        document.querySelector("#layer-switcher-item_wme_col_basemap").checked = layerEnabled;
+        wmeSDK.LayerSwitcher.setLayerCheckboxChecked( {name: NAME, isChecked: layerEnabled })
         document.getElementById(ELEMENT_SETTINGS_TOGGLE_ID).checked = layerEnabled;
 
         // toggles date picker
@@ -230,24 +276,30 @@
 
         if (DEBUG) pageWindow.wmeColBasemap = { getJSON, getTicket, refreshTicket, getMostRecentDate, createURL, addLayer, updateLayerDate, addSettingsBubble, toggleBasemap, layer };
 
-        addLayer();
+        //addLayer();
 
         console.log("WME COL Basemap: Added Layer");
 
-        const i = setInterval(() => {
-            if (WazeWrap?.Ready) {
-                clearInterval(i);
-                WazeWrap.Interface.AddLayerCheckbox(
-                    "display",
-                    NAME,
-                    false,
-                    toggleBasemap,
-                    layer ?? W.map.getLayerByName(NAME));
+        wmeSDK.LayerSwitcher.addLayerCheckbox({name: NAME});
+        wmeSDK.Events.on({ eventName: 'wme-layer-checkbox-toggled', eventHandler: toggleBasemap});
+        
+        const shortKey = localStorage.getItem(STORAGE_SHORTCUT_KEY)
 
-                new WazeWrap.Interface.Shortcut('COLBasemapDisplay', 'Toggle COL Basemap',
-                    'layers', 'layersToggleCOLBasemapDisplay', localStorage.getItem(STORAGE_SHORTCUT_KEY) ?? "", toggleBasemap, null).add();
+        if (null !== shortKey && shortKey !== '') {
+            if (wmeSDK.Shortcuts.areShortcutKeysInUse( { shortKey })) {
+                console.log("Shortcut key '${shortKey}' already in use. Will not set a shortcut key.")
             }
-        }, 500);
+            else {
+                wmeSDK.Shortcuts.createShortcut(
+                    {
+                        shortcutId: 'toggle-col-basemap',
+                        description: 'Toggle WME COL Basemap',
+                        callback: toggleBasemap,
+                        shortcutKeys: shortKey
+                    }
+                )
+            }
+        }
 
         const dates = JSON.parse(localStorage.getItem(STORAGE_DATES_KEY) ?? "[]");
         const { tabLabel, tabPane } = W.userscripts.registerSidebarTab("wmeColBasemap");
@@ -299,9 +351,7 @@
 
         const colLink = document.getElementById(ELEMENT_SETTINGS_COL_LINK_ID);
         colLink.addEventListener("mousedown", () => {
-            const center = W.map.getCenter();
-            const lonlat = new OpenLayers.LonLat(center.lon, center.lat);
-            lonlat.transform(new OpenLayers.Projection('EPSG:900913'), new OpenLayers.Projection('EPSG:4326'));
+            const lonlat = wmeSDK.Map.getMapCenter();
             colLink.href = `https://maps.cityoflewisville.com/?&zoom=${W.map.getZoom()}&center=${lonlat.lat},${lonlat.lon}&basemap=nearmap_${currentDate?.replaceAll(".", "") ?? getMostRecentDate()}`;
         });
 
@@ -332,6 +382,18 @@
 
     }
 
-    W?.userscripts?.state?.isReady ? initialize() : document.addEventListener("wme-ready", initialize, { once: true });
+    let wmeSDK
+    unsafeWindow.SDK_INITIALIZED.then(() => {
+    if (!unsafeWindow.getWmeSdk) {
+        throw new Error(`${GM_info.script.name}: SDK is not initalized`)
+    };
+    wmeSDK = unsafeWindow.getWmeSdk({
+        scriptId: 'wme-col-basemap',
+        scriptName: 'WME COL Basemap'
+    });
+    console.debug(`${GM_info.script.name}: SDK v${wmeSDK.getSDKVersion()} initalized`);
+    wmeSDK.Events.once({ eventName: 'wme-ready' }).then(initialize);
+    })
+
     pageWindow.colInit = initialize;
 })();
